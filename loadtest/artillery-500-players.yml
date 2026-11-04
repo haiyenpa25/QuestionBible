@@ -1,0 +1,34 @@
+# Kịch bản kiểm thử tải 500 người chơi đồng thời cho QuestionBible
+# Chạy bằng lệnh: npx artillery run loadtest/artillery-500-players.yml
+config:
+  target: "http://127.0.0.1:3000"
+  phases:
+    - duration: 25
+      arrivalRate: 20
+      name: "500 người chơi vào phòng trong 25 giây"
+  engines:
+    socketio-v3:
+      transports: ["websocket"]
+  variables:
+    testPin: "123456"
+
+scenarios:
+  - name: "Người chơi vào phòng và trả lời câu hỏi"
+    engine: socketio-v3
+    flow:
+      - emit:
+          channel: "player:join"
+          data:
+            pin: "{{ testPin }}"
+            nickname: "Player_{{ $randomNumber(1000, 99999) }}"
+      - think: 3
+      - loop:
+          - think: "{{ $randomNumber(1, 10) }}"
+          - emit:
+              channel: "player:answer"
+              data:
+                q: "{{ $loopCount }}"
+                choice: "{{ $randomNumber(0, 3) }}"
+          - think: 8
+        count: 10
+

@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: 'Be Vietnam Pro', system-ui, -apple-system, sans-serif;
+  }
+}
+
+/* Hiệu ứng nút bấm 3D xúc giác trên điện thoại & màn hình lớn */
+.btn-answer-tile {
+  transition: transform 0.08s ease, filter 0.15s ease;
+}
+.btn-answer-tile:active:not(:disabled) {
+  transform: translateY(3px) scale(0.99);
+}
+

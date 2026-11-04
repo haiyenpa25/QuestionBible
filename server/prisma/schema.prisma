@@ -1,0 +1,204 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  admin
+  editor
+  host
+}
+
+enum Testament {
+  OT
+  NT
+}
+
+enum QuizAudience {
+  kids
+  teens
+  youth
+  adults
+  all
+}
+
+enum QuizVisibility {
+  private
+  church
+  public
+}
+
+enum QuizStatus {
+  draft
+  review
+  approved
+}
+
+enum QuestionType {
+  quiz
+  true_false
+  type_answer
+  order
+  slider
+  poll
+}
+
+enum GameMode {
+  classic
+  team
+  self_paced
+}
+
+model User {
+  id           Int           @id @default(autoincrement())
+  email        String        @unique @db.VarChar(191)
+  passwordHash String        @map("password_hash") @db.VarChar(255)
+  displayName  String        @map("display_name") @db.VarChar(100)
+  churchName   String?       @map("church_name") @db.VarChar(191)
+  role         UserRole      @default(host)
+  createdAt    DateTime      @default(now()) @map("created_at")
+  quizzes      Quiz[]
+  gameSessions GameSession[]
+
+  @@map("users")
+}
+
+model BibleBook {
+  id        Int        @id @db.UnsignedTinyInt
+  nameVi    String     @map("name_vi") @db.VarChar(50)
+  abbrVi    String     @map("abbr_vi") @db.VarChar(10)
+  testament Testament
+  chapters  Int        @db.UnsignedTinyInt
+  questions Question[]
+
+  @@map("bible_books")
+}
+
+model Quiz {
+  id           Int            @id @default(autoincrement())
+  ownerId      Int            @map("owner_id")
+  title        String         @db.VarChar(191)
+  description  String?        @db.Text
+  coverImage   String?        @map("cover_image") @db.VarChar(255)
+  audience     QuizAudience   @default(all)
+  visibility   QuizVisibility @default(private)
+  status       QuizStatus     @default(draft)
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+  owner        User           @relation(fields: [ownerId], references: [id])
+  questions    Question[]
+  gameSessions GameSession[]
+
+  @@map("quizzes")
+}
+
+model Question {
+  id              Int              @id @default(autoincrement())
+  quizId          Int              @map("quiz_id")
+  position        Int              @db.UnsignedSmallInt
+  type            QuestionType     @default(quiz)
+  content         String           @db.Text
+  imageUrl        String?          @map("image_url") @db.VarChar(255)
+  timeLimit       Int              @default(20) @map("time_limit") @db.UnsignedSmallInt
+  pointsFactor    Int              @default(1) @map("points_factor") @db.UnsignedTinyInt
+  bookId          Int?             @map("book_id") @db.UnsignedTinyInt
+  chapter         Int?             @db.UnsignedSmallInt
+  verseFrom       Int?             @map("verse_from") @db.UnsignedSmallInt
+  verseTo         Int?             @map("verse_to") @db.UnsignedSmallInt
+  verseText       String?          @map("verse_text") @db.Text
+  explanation     String?          @db.Text
+  difficulty      Int              @default(2) @db.UnsignedTinyInt
+  sliderMin       Int?             @map("slider_min")
+  sliderMax       Int?             @map("slider_max")
+  sliderAnswer    Int?             @map("slider_answer")
+  sliderTolerance Int?             @map("slider_tolerance")
+  quiz            Quiz             @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  book            BibleBook?       @relation(fields: [bookId], references: [id])
+  options         QuestionOption[]
+  questionTags    QuestionTag[]
+  gameAnswers     GameAnswer[]
+
+  @@index([quizId, position], map: "idx_quiz_pos")
+  @@map("questions")
+}
+
+model QuestionOption {
+  id         Int      @id @default(autoincrement())
+  questionId Int      @map("question_id")
+  position   Int      @db.UnsignedTinyInt
+  content    String   @db.VarChar(255)
+  isCorrect  Boolean  @default(false) @map("is_correct")
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@map("question_options")
+}
+
+model Tag {
+  id           Int           @id @default(autoincrement())
+  name         String        @unique @db.VarChar(100)
+  questionTags QuestionTag[]
+
+  @@map("tags")
+}
+
+model QuestionTag {
+  questionId Int      @map("question_id")
+  tagId      Int      @map("tag_id")
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  tag        Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([questionId, tagId])
+  @@map("question_tags")
+}
+
+model GameSession {
+  id          Int          @id @default(autoincrement())
+  quizId      Int          @map("quiz_id")
+  hostId      Int          @map("host_id")
+  pin         String       @db.Char(6)
+  mode        GameMode     @default(classic)
+  settings    Json?
+  playerCount Int          @default(0) @map("player_count") @db.UnsignedSmallInt
+  startedAt   DateTime?    @map("started_at")
+  endedAt     DateTime?    @map("ended_at")
+  quiz        Quiz         @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  host        User         @relation(fields: [hostId], references: [id])
+  players     GamePlayer[]
+
+  @@index([pin], map: "idx_pin")
+  @@map("game_sessions")
+}
+
+model GamePlayer {
+  id           Int          @id @default(autoincrement())
+  sessionId    Int          @map("session_id")
+  nickname     String       @db.VarChar(30)
+  teamName     String?      @map("team_name") @db.VarChar(50)
+  finalScore   Int          @default(0) @map("final_score") @db.UnsignedInt
+  finalRank    Int?         @map("final_rank") @db.UnsignedSmallInt
+  correctCount Int          @default(0) @map("correct_count") @db.UnsignedSmallInt
+  session      GameSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  answers      GameAnswer[]
+
+  @@map("game_players")
+}
+
+model GameAnswer {
+  id         Int        @id @default(autoincrement())
+  playerId   Int        @map("player_id")
+  questionId Int        @map("question_id")
+  answer     Json
+  isCorrect  Boolean    @map("is_correct")
+  responseMs Int        @map("response_ms") @db.UnsignedInt
+  points     Int        @db.UnsignedInt
+  player     GamePlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  question   Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([questionId], map: "idx_question")
+  @@map("game_answers")
+}
+
