@@ -202,14 +202,14 @@ function syncActiveQuestionToPlayer(
     });
 
     if (room.state === 'ANSWERING') {
-      const activeNow = room.paused ? room.pausedAt : Date.now();
-      const elapsedSec = Math.floor((activeNow - room.questionStartAt - room.totalPausedMs) / 1000);
-      const remainingSec = Math.max(qData.timeLimit - elapsedSec, 1);
+      const remainingMs = room.getRemainingAnswerMs();
+      const remainingSec = Math.max(Math.ceil(remainingMs / 1000), 1);
 
       socket.emit('question:start', {
         q: room.currentQ,
         duration: remainingSec,
         serverTime: room.questionStartAt,
+        endsAt: room.getAnswerEndsAt(),
         options:
           qData.type === 'order' || qData.type === 'poll' || room.options.showQuestionOnPlayer
             ? shuffledOptions
@@ -219,7 +219,7 @@ function syncActiveQuestionToPlayer(
       if (room.paused) {
         socket.emit('room:paused', {
           paused: true,
-          remainingMs: remainingSec * 1000
+          remainingMs
         });
       }
 
@@ -230,5 +230,12 @@ function syncActiveQuestionToPlayer(
   } else if (room.state === 'REVEAL' || room.state === 'LEADERBOARD') {
     // Sửa lỗi #14: Nếu người chơi kết nối lại lúc đang REVEAL hoặc LEADERBOARD, gửi lại kết quả câu vừa xong để không bị màn hình trống
     socket.emit('player:result', room.buildPlayerResultPayload(player, room.currentQ));
+  } else if (room.state === 'SCRIPTURE') {
+    socket.emit('player:result', room.buildPlayerResultPayload(player, room.currentQ));
+    const sync = room.getHostSyncPayload(false);
+    if (sync.scripture) socket.emit('scripture:show', sync.scripture);
+  } else if (room.state === 'PODIUM' || room.state === 'ENDED') {
+    // Tải lại trang sau khi kết thúc vẫn xem lại được kết quả cá nhân
+    socket.emit('game:podium', room.buildPlayerPodiumPayload(player));
   }
 }

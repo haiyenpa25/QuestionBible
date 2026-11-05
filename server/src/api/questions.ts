@@ -15,6 +15,7 @@ interface QuestionPayloadBody {
   verseTo?: number | null;
   verseText?: string | null;
   explanation?: string | null;
+  hostNotes?: string | null;
   difficulty?: number;
   sliderMin?: number | null;
   sliderMax?: number | null;
@@ -83,6 +84,7 @@ export async function registerQuestionRoutes(app: FastifyInstance): Promise<void
         verseTo: body.verseTo ? Number(body.verseTo) : null,
         verseText: body.verseText?.trim() || null,
         explanation: body.explanation?.trim() || null,
+        hostNotes: body.hostNotes?.trim().slice(0, 2000) || null,
         difficulty: Number(body.difficulty ?? 2),
         sliderMin: body.sliderMin !== undefined && body.sliderMin !== null ? Number(body.sliderMin) : null,
         sliderMax: body.sliderMax !== undefined && body.sliderMax !== null ? Number(body.sliderMax) : null,
@@ -172,6 +174,10 @@ export async function registerQuestionRoutes(app: FastifyInstance): Promise<void
           body.verseTo !== undefined ? (body.verseTo ? Number(body.verseTo) : null) : existing.verseTo,
         verseText: body.verseText !== undefined ? body.verseText : existing.verseText,
         explanation: body.explanation !== undefined ? body.explanation : existing.explanation,
+        hostNotes:
+          body.hostNotes !== undefined
+            ? body.hostNotes?.trim().slice(0, 2000) || null
+            : existing.hostNotes,
         difficulty: body.difficulty !== undefined ? Number(body.difficulty) : existing.difficulty,
         sliderMin: body.sliderMin !== undefined ? body.sliderMin : existing.sliderMin,
         sliderMax: body.sliderMax !== undefined ? body.sliderMax : existing.sliderMax,

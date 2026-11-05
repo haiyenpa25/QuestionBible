@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import QRCode from 'qrcode';
 import confetti from 'canvas-confetti';
@@ -17,6 +17,51 @@ const soundMuted = ref<boolean>(soundManager.muted);
 const showSettingsPanel = ref<boolean>(false);
 const showScriptureModal = ref<boolean>(false);
 const playJoinUrl = ref<string>('');
+
+// Màn chiếu riêng (/screen/:pin): chỉ hiển thị, không có nút điều khiển & không lộ đáp án trước
+const isScreen = computed(() => route.name === 'screen');
+const showRemoteModal = ref<boolean>(false);
+const remoteQrDataUrl = ref<string>('');
+const showAnswerKey = ref<boolean>(false);
+
+const remoteUrl = computed(() =>
+  host.pin && host.remoteKey
+    ? `${window.location.origin}/remote/${host.pin}?key=${host.remoteKey}`
+    : ''
+);
+
+const nextButtonLabel = computed(() => {
+  const isLast = host.currentQuestion
+    ? host.currentQuestion.q + 1 >= host.currentQuestion.totalQuestions
+    : false;
+  if (host.state === 'REVEAL') {
+    const hasScripture = Boolean(host.revealData?.verseText || host.revealData?.explanation);
+    if (host.options.scriptureStep && hasScripture) return '📖 Chia Sẻ Lời Chúa →';
+    return isLast ? '🏆 Bục Vinh Danh →' : 'Bảng Xếp Hạng →';
+  }
+  if (host.state === 'SCRIPTURE') return isLast ? '🏆 Bục Vinh Danh →' : 'Bảng Xếp Hạng →';
+  return 'Câu Tiếp Theo →';
+});
+
+async function openRemoteModal() {
+  showRemoteModal.value = true;
+  if (!remoteUrl.value) return;
+  try {
+    remoteQrDataUrl.value = await QRCode.toDataURL(remoteUrl.value, { width: 260, margin: 1 });
+  } catch {
+    remoteQrDataUrl.value = '';
+  }
+}
+
+function openScreenWindow() {
+  if (!host.pin) return;
+  window.open(`/screen/${host.pin}`, `qb-screen-${host.pin}`, 'popup,width=1280,height=720');
+  // Màn chiếu sẽ phát âm thanh; tắt tiếng bảng điều khiển để không bị vang đôi
+  if (!soundMuted.value) {
+    soundMuted.value = soundManager.toggleMute();
+    soundManager.stopLobbyMusic();
+  }
+}
 
 const TILE_COLORS = [
   'bg-answer-red border-red-800',
@@ -92,18 +137,36 @@ function downloadExcelReport() {
 }
 
 function handleKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && showScriptureModal.value) {
+  if (e.key === 'Escape') {
     showScriptureModal.value = false;
+    showRemoteModal.value = false;
   }
 }
 
 onMounted(async () => {
   window.addEventListener('keydown', handleKeydown);
+
+  if (isScreen.value) {
+    const res = await host.rejoin(String(route.params.pin ?? ''), 'screen');
+    if (res.ok && host.state === 'LOBBY' && !soundMuted.value) {
+      soundManager.startLobbyMusic();
+    }
+    return;
+  }
+
+  // Tải lại trang bảng điều khiển giữa trận: gắn lại đúng phòng cũ thay vì mở phòng mới
+  const existingPin = typeof route.query.pin === 'string' ? route.query.pin : '';
+  if (existingPin) {
+    const res = await host.rejoin(existingPin, 'control');
+    if (res.ok) return;
+  }
+
   const quizId = Number(route.params.quizId);
   if (quizId) {
     const res = await host.createRoom(quizId);
-    if (res.ok && !soundMuted.value) {
-      soundManager.startLobbyMusic();
+    if (res.ok && res.pin) {
+      void router.replace({ query: { ...route.query, pin: res.pin } });
+      if (!soundMuted.value) soundManager.startLobbyMusic();
     }
   }
 });
@@ -120,6 +183,7 @@ onUnmounted(() => {
     <header class="h-16 px-4 sm:px-6 bg-slate-900 border-b border-slate-800 flex items-center justify-between gap-4 shrink-0">
       <div class="flex items-center gap-4 min-w-0">
         <router-link
+          v-if="!isScreen"
           to="/studio"
           class="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 shrink-0"
         >
@@ -140,14 +204,52 @@ onUnmounted(() => {
         </h1>
       </div>
 
-      <!-- Các nút điều khiển nhịp trận đấu -->
-      <div class="flex items-center gap-2 shrink-0">
+      <!-- Màn chiếu riêng: chỉ có nút âm thanh & toàn màn hình -->
+      <div v-if="isScreen" class="flex items-center gap-2 shrink-0">
+        <span v-if="host.errorMsg" class="text-xs font-bold text-red-300">{{ host.errorMsg }}</span>
         <button
           type="button"
           class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200"
           @click="toggleSound"
         >
           {{ soundMuted ? '🔇 Bật âm' : '🔊 Đang bật âm' }}
+        </button>
+        <button
+          type="button"
+          class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200"
+          @click="toggleFullscreen"
+        >
+          ⛶ Toàn màn hình
+        </button>
+      </div>
+
+      <!-- Các nút điều khiển nhịp trận đấu -->
+      <div v-else class="flex items-center gap-2 shrink-0">
+        <button
+          type="button"
+          class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200"
+          @click="toggleSound"
+        >
+          {{ soundMuted ? '🔇 Bật âm' : '🔊 Đang bật âm' }}
+        </button>
+
+        <button
+          v-if="host.pin"
+          type="button"
+          class="hidden md:inline-flex px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200"
+          title="Mở cửa sổ màn chiếu riêng, kéo sang máy chiếu (không hiện đáp án trước, không có nút bấm)"
+          @click="openScreenWindow"
+        >
+          🖥️ Mở màn chiếu
+        </button>
+
+        <button
+          v-if="host.remoteKey"
+          type="button"
+          class="px-3 py-2 rounded-lg border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 text-xs font-bold text-sky-200"
+          @click="openRemoteModal"
+        >
+          📱 Điều khiển bằng ĐT
         </button>
 
         <button
@@ -197,13 +299,13 @@ onUnmounted(() => {
           </button>
         </template>
 
-        <template v-else-if="host.state === 'REVEAL' || host.state === 'LEADERBOARD'">
+        <template v-else-if="host.state === 'REVEAL' || host.state === 'SCRIPTURE' || host.state === 'LEADERBOARD'">
           <button
             type="button"
             class="px-5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-sm"
             @click="host.nextPhase()"
           >
-            {{ host.state === 'REVEAL' ? 'Bảng Xếp Hạng →' : 'Câu Tiếp Theo →' }}
+            {{ nextButtonLabel }}
           </button>
         </template>
 
@@ -217,6 +319,31 @@ onUnmounted(() => {
         </button>
       </div>
     </header>
+
+    <!-- Đáp án & ghi chú người dẫn: ẩn mặc định để không lộ lên máy chiếu -->
+    <div
+      v-if="!isScreen && host.answerKey && host.state !== 'LOBBY' && host.state !== 'PODIUM'"
+      class="px-4 sm:px-6 py-2 bg-slate-900/80 border-b border-slate-800 text-xs"
+    >
+      <button
+        type="button"
+        class="font-bold text-sky-300 hover:text-sky-200"
+        @click="showAnswerKey = !showAnswerKey"
+      >
+        🔒 {{ showAnswerKey ? 'Ẩn đáp án & ghi chú' : 'Xem đáp án & ghi chú người dẫn (đừng bấm khi đang chiếu màn này)' }}
+      </button>
+      <div v-if="showAnswerKey" class="mt-2 grid gap-2 sm:grid-cols-2">
+        <p class="rounded-lg bg-emerald-950/60 border border-emerald-500/30 p-2.5 text-emerald-200">
+          <strong>Đáp án câu {{ host.answerKey.q + 1 }}:</strong> {{ host.answerKey.correctText }}
+        </p>
+        <p
+          v-if="host.answerKey.hostNotes"
+          class="rounded-lg bg-sky-950/60 border border-sky-500/30 p-2.5 text-sky-100 whitespace-pre-line"
+        >
+          <strong>Ghi chú:</strong> {{ host.answerKey.hostNotes }}
+        </p>
+      </div>
+    </div>
 
     <!-- 1. SẢNH CHỜ (LOBBY) -->
     <main
@@ -232,6 +359,7 @@ onUnmounted(() => {
                 Bước 1: Mở điện thoại truy cập {{ playJoinUrl || '/play' }}
               </span>
               <button
+                v-if="!isScreen"
                 type="button"
                 class="text-xs font-bold text-amber-400 hover:text-amber-300 underline"
                 @click="showSettingsPanel = !showSettingsPanel"
@@ -275,7 +403,7 @@ onUnmounted(() => {
 
       <!-- Bảng tuỳ chỉnh chế độ chơi (Thiếu nhi, Đội, Thân thiện...) -->
       <div
-        v-if="showSettingsPanel"
+        v-if="showSettingsPanel && !isScreen"
         class="rounded-2xl border border-amber-500/30 bg-slate-900 p-6 grid grid-cols-1 md:grid-cols-3 gap-4"
       >
         <label class="flex items-start gap-3 cursor-pointer">
@@ -316,6 +444,19 @@ onUnmounted(() => {
             <span class="text-xs text-slate-400">Tính điểm trung bình theo từng Đội/Tổ ngoài bảng xếp hạng cá nhân.</span>
           </div>
         </label>
+
+        <label class="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            :checked="host.options.scriptureStep"
+            class="mt-1 w-4 h-4 accent-amber-500"
+            @change="host.updateOptions({ scriptureStep: !host.options.scriptureStep })"
+          />
+          <div>
+            <span class="block text-sm font-bold text-white">Bước "Chia sẻ Lời Chúa" sau mỗi câu</span>
+            <span class="text-xs text-slate-400">Câu nào có câu gốc / bài học sẽ được chiếu toàn màn hình và gửi xuống điện thoại trước khi xem bảng xếp hạng.</span>
+          </div>
+        </label>
       </div>
 
       <!-- Danh sách người chơi đã vào sảnh chờ -->
@@ -324,7 +465,7 @@ onUnmounted(() => {
           <h2 class="text-lg font-extrabold text-white">
             Danh Sách Người Chơi Đã Vào Phòng ({{ host.players.length }})
           </h2>
-          <span class="text-xs text-slate-400">
+          <span v-if="!isScreen" class="text-xs text-slate-400">
             Bấm vào dấu ✕ cạnh tên để mời người chơi có biệt danh không phù hợp ra khỏi phòng
           </span>
         </div>
@@ -355,6 +496,7 @@ onUnmounted(() => {
               {{ p.teamName }}
             </span>
             <button
+              v-if="!isScreen"
               type="button"
               class="ml-1 text-slate-400 hover:text-red-400 font-black"
               :title="`Mời ${p.nickname} rời phòng`"
@@ -599,6 +741,37 @@ onUnmounted(() => {
       </div>
     </main>
 
+    <!-- 3b. CHIA SẺ LỜI CHÚA (SCRIPTURE): chiếu câu gốc toàn màn hình cho cả hội trường -->
+    <main
+      v-else-if="host.state === 'SCRIPTURE' && host.scriptureData"
+      class="flex-1 w-full flex items-center justify-center p-6 sm:p-12 bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950"
+    >
+      <div class="max-w-5xl w-full text-center space-y-8">
+        <div class="inline-flex items-center gap-2 rounded-full bg-amber-500/15 border border-amber-500/40 px-5 py-1.5 text-amber-300 text-sm font-bold uppercase tracking-widest">
+          📖 Chia Sẻ Lời Chúa • Câu {{ host.scriptureData.q + 1 }}
+        </div>
+
+        <blockquote
+          v-if="host.scriptureData.verseText"
+          class="font-serif italic text-3xl md:text-5xl leading-relaxed text-amber-50"
+        >
+          “{{ host.scriptureData.verseText }}”
+        </blockquote>
+
+        <p v-if="host.scriptureData.bibleReference" class="text-2xl md:text-3xl font-extrabold text-amber-400">
+          — {{ host.scriptureData.bibleReference }} (Bản Truyền Thống 1925) —
+        </p>
+
+        <div
+          v-if="host.scriptureData.explanation"
+          class="mx-auto max-w-3xl rounded-2xl bg-slate-800/70 border border-slate-700 p-6 text-left"
+        >
+          <p class="text-xs font-bold uppercase tracking-wider text-amber-400 mb-2">Bài học & áp dụng</p>
+          <p class="text-lg md:text-2xl text-slate-100 leading-relaxed">{{ host.scriptureData.explanation }}</p>
+        </div>
+      </div>
+    </main>
+
     <!-- 4. BẢNG XẾP HẠNG SAU MỖI CÂU (LEADERBOARD) -->
     <main
       v-else-if="host.state === 'LEADERBOARD' && host.leaderboardData"
@@ -751,7 +924,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Hành động sau trận: Xuất Excel / Xem báo cáo -->
-      <div class="flex flex-wrap items-center justify-center gap-4 pt-4">
+      <div v-if="!isScreen" class="flex flex-wrap items-center justify-center gap-4 pt-4">
         <button
           v-if="host.podiumData.sessionId"
           type="button"
@@ -787,6 +960,36 @@ onUnmounted(() => {
       :explanation="host.revealData?.explanation"
       @close="showScriptureModal = false"
     />
+
+    <!-- Modal ghép điện thoại điều khiển -->
+    <div
+      v-if="showRemoteModal && !isScreen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/95 p-6"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Ghép điện thoại điều khiển"
+    >
+      <div class="max-w-md w-full rounded-2xl border-2 border-sky-500/40 bg-slate-900 p-6 text-center space-y-4">
+        <h2 class="text-xl font-extrabold text-white">📱 Điều khiển trận đấu bằng điện thoại</h2>
+        <p class="rounded-lg border border-red-500/40 bg-red-500/10 p-2.5 text-xs font-bold text-red-200">
+          ⚠️ Mã này cho phép điều khiển phòng và xem đáp án trước. Đừng mở khi màn hình này đang chiếu lên máy chiếu.
+        </p>
+        <div v-if="remoteQrDataUrl" class="inline-block p-3 bg-white rounded-2xl">
+          <img :src="remoteQrDataUrl" alt="QR ghép điện thoại điều khiển" class="w-56 h-56" />
+        </div>
+        <p class="text-xs text-slate-400 break-all select-all">{{ remoteUrl }}</p>
+        <p class="text-xs text-slate-300">
+          Quét bằng camera điện thoại. Không cần đăng nhập. Tối đa 5 thiết bị (VD: người dẫn + trợ lý kỹ thuật).
+        </p>
+        <button
+          type="button"
+          class="w-full rounded-xl bg-amber-500 hover:bg-amber-400 py-3 text-sm font-extrabold text-slate-950"
+          @click="showRemoteModal = false"
+        >
+          Đóng (ESC)
+        </button>
+      </div>
+    </div>
   </div>
 </template>
 

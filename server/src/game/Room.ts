@@ -18,9 +18,13 @@ import {
   type PodiumPayload,
   type PlayerAnswerPayload,
   type QuestionOptionView,
-  type PlayerResultPayload
+  type PlayerResultPayload,
+  type ScripturePayload,
+  type RemoteAnswerKeyPayload,
+  type HostSyncPayload,
+  type PersonalReviewItem
 } from '@questionbible/shared';
-import { Player } from './Player.js';
+import { Player, type PlayerQuestionRecord } from './Player.js';
 import { normalizeNicknameKey } from '../moderation/badwords-vi.js';
 import {
   saveRoomSnapshotToRedis,
@@ -40,6 +44,7 @@ export interface RoomQuestionData {
   bibleReference?: string | null;
   verseText?: string | null;
   explanation?: string | null;
+  hostNotes?: string | null;
   sliderMin?: number | null;
   sliderMax?: number | null;
   sliderAnswer?: number | null;
@@ -64,6 +69,9 @@ export class Room {
   public endedAtMs: number | null = null;
   public sessionId: number | null = null;
   public hostSocketId: string | null = null;
+  // Điện thoại điều khiển từ xa: ghép bằng khoá bí mật remoteKey (không cần đăng nhập trên điện thoại)
+  public readonly remoteKey: string;
+  public remoteSockets = new Set<string>();
   public state: RoomState = 'LOBBY';
   public locked = false;
   public options: RoomOptions;
@@ -92,6 +100,12 @@ export class Room {
   private currentShuffledOptions: QuestionOptionView[] = [];
   // Ánh xạ mã token hiển thị trên client -> thứ tự thật trên server cho câu sắp xếp (Sửa lỗi #6)
   private orderTokenToRealPosition = new Map<number, number>();
+  // Bộ nhớ đệm các màn gần nhất để đồng bộ lại màn chiếu / điều khiển khi vào giữa trận
+  private lastHostIntro: QuestionIntroHostPayload | null = null;
+  private lastReveal: QuestionRevealPayload | null = null;
+  private lastScripture: ScripturePayload | null = null;
+  private lastLeaderboard: LeaderboardPayload | null = null;
+  private lastPodium: PodiumPayload | null = null;
 
   constructor(params: {
     pin: string;
@@ -101,9 +115,11 @@ export class Room {
     hostSocketId: string | null;
     questions: RoomQuestionData[];
     options?: Partial<RoomOptions>;
+    remoteKey?: string;
     io: Server<ClientToServerEvents, ServerToClientEvents>;
   }) {
     this.roomId = crypto.randomUUID();
+    this.remoteKey = params.remoteKey || crypto.randomBytes(16).toString('hex');
     this.pin = params.pin;
     this.quizId = params.quizId;
     this.quizTitle = params.quizTitle;
@@ -120,6 +136,7 @@ export class Room {
       showQuestionOnPlayer: params.options?.showQuestionOnPlayer ?? false,
       partialOrderScoring: params.options?.partialOrderScoring ?? true,
       randomBibleNickname: params.options?.randomBibleNickname ?? false,
+      scriptureStep: params.options?.scriptureStep ?? true,
       openingPrayerOrVerse:
         params.options?.openingPrayerOrVerse ??
         '“Lời Chúa là ngọn đèn cho chân tôi, ánh sáng cho đường lối tôi.” — Thi Thiên 119:105',
@@ -138,6 +155,114 @@ export class Room {
 
   public get hostRoomName(): string {
     return `host:${this.pin}`;
+  }
+
+  /** Phòng Socket.IO riêng cho điện thoại điều khiển: nhận đáp án trước & ghi chú người dẫn */
+  public get remoteRoomName(): string {
+    return `remote:${this.pin}`;
+  }
+
+  /** Socket có quyền điều khiển nhịp trận: máy chủ phòng hoặc điện thoại điều khiển đã ghép */
+  public canControl(socketId: string): boolean {
+    return this.hostSocketId === socketId || this.remoteSockets.has(socketId);
+  }
+
+  public isRemoteKeyValid(key: unknown): boolean {
+    if (typeof key !== 'string' || key.length !== this.remoteKey.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(key), Buffer.from(this.remoteKey));
+  }
+
+  /** Mốc giờ server hết giờ trả lời (không tính thời gian ân hạn) */
+  public getAnswerEndsAt(): number {
+    return this.questionStartAt + this.totalPausedMs + this.questionDurationMs;
+  }
+
+  public getRemainingAnswerMs(): number {
+    if (this.state !== 'ANSWERING') return 0;
+    const now = this.paused ? this.pausedAt : Date.now();
+    return Math.max(this.questionDurationMs - (now - this.questionStartAt - this.totalPausedMs), 0);
+  }
+
+  public countAnsweredCurrent(): number {
+    let answered = 0;
+    for (const p of this.players.values()) {
+      if (p.answers.has(this.currentQ)) answered++;
+    }
+    return answered;
+  }
+
+  /** Diễn giải đáp án đúng thành chữ cho điện thoại điều khiển & màn xem lại cá nhân */
+  private describeCorrectAnswer(qData: RoomQuestionData): string {
+    switch (qData.type) {
+      case 'poll':
+        return 'Câu thăm dò — không có đáp án đúng/sai';
+      case 'order':
+        return [...qData.options]
+          .sort((a, b) => a.position - b.position)
+          .map((o) => o.content)
+          .join(' → ');
+      case 'slider': {
+        const tol = qData.sliderTolerance ? ` (±${qData.sliderTolerance})` : '';
+        return `${qData.sliderAnswer ?? '?'}${tol}`;
+      }
+      case 'type_answer':
+        return qData.options.map((o) => o.content).join(' / ');
+      default:
+        return (
+          qData.options
+            .filter((o) => o.isCorrect)
+            .map((o) => o.content)
+            .join(' / ') || '(chưa đánh dấu đáp án đúng)'
+        );
+    }
+  }
+
+  private describePlayerAnswer(qData: RoomQuestionData, rec: PlayerQuestionRecord): string {
+    const optionText = (pos: number) =>
+      qData.options.find((o) => o.position === pos)?.content ?? `Phương án ${pos + 1}`;
+    const a = rec.answer;
+    if (qData.type === 'order' && Array.isArray(a.order)) {
+      return a.order.map((pos) => optionText(pos)).join(' → ');
+    }
+    if (qData.type === 'type_answer') return String(a.text ?? '');
+    if (qData.type === 'slider') return String(a.value ?? '');
+    if (typeof a.choice === 'number') return optionText(a.choice);
+    if (Array.isArray(a.choice)) return a.choice.map((c) => optionText(c)).join(' / ');
+    return '';
+  }
+
+  private buildAnswerKey(): RemoteAnswerKeyPayload | null {
+    const qData = this.questions[this.currentQ];
+    if (!qData) return null;
+    return {
+      q: this.currentQ,
+      type: qData.type,
+      correctText: this.describeCorrectAnswer(qData),
+      hostNotes: qData.hostNotes ?? null
+    };
+  }
+
+  /** Gói đồng bộ đầy đủ cho màn chiếu / bảng điều khiển / điện thoại điều khiển */
+  public getHostSyncPayload(includeAnswerKey: boolean): HostSyncPayload {
+    const inQuestion = this.currentQ >= 0 && this.state !== 'LOBBY';
+    return {
+      pin: this.pin,
+      quizTitle: this.quizTitle,
+      totalQuestions: this.questions.length,
+      state: this.state,
+      paused: this.paused,
+      remainingMs: this.getRemainingAnswerMs(),
+      endsAt: this.state === 'ANSWERING' && !this.paused ? this.getAnswerEndsAt() : null,
+      answered: inQuestion ? this.countAnsweredCurrent() : 0,
+      totalPlayers: this.players.size,
+      lobby: this.getLobbyPayload(),
+      intro: inQuestion ? this.lastHostIntro : null,
+      reveal: this.state === 'REVEAL' || this.state === 'SCRIPTURE' ? this.lastReveal : null,
+      scripture: this.state === 'SCRIPTURE' ? this.lastScripture : null,
+      leaderboard: this.state === 'LEADERBOARD' ? this.lastLeaderboard : null,
+      podium: this.state === 'PODIUM' || this.state === 'ENDED' ? this.lastPodium : null,
+      answerKey: includeAnswerKey && inQuestion ? this.buildAnswerKey() : undefined
+    };
   }
 
   public getCurrentShuffledOptions(): QuestionOptionView[] {
@@ -197,10 +322,7 @@ export class Room {
 
   public scheduleAnswerCountUpdate(immediate = false): void {
     const emitCount = () => {
-      let answered = 0;
-      for (const p of this.players.values()) {
-        if (p.answers.has(this.currentQ)) answered++;
-      }
+      const answered = this.countAnsweredCurrent();
       this.io.to(this.hostRoomName).emit('answer:count', {
         q: this.currentQ,
         answered,
@@ -413,6 +535,9 @@ export class Room {
       this.hostSocketId = null;
       return;
     }
+    if (this.remoteSockets.delete(socketId)) {
+      return;
+    }
 
     const playerId = this.socketIndex.get(socketId);
     if (!playerId) return;
@@ -488,8 +613,17 @@ export class Room {
       sliderMax: qData.sliderMax
     };
 
+    this.lastHostIntro = hostIntro;
+    this.lastReveal = null;
+    this.lastScripture = null;
+    this.lastLeaderboard = null;
+
     this.io.to(this.hostRoomName).emit('question:intro', hostIntro);
     this.io.to(this.socketRoomName).emit('question:intro', playerIntro);
+    const answerKey = this.buildAnswerKey();
+    if (answerKey) {
+      this.io.to(this.remoteRoomName).emit('remote:answer-key', answerKey);
+    }
 
     void saveRoomSnapshotToRedis(this);
 
@@ -547,6 +681,7 @@ export class Room {
       q: this.currentQ,
       duration: qData.timeLimit,
       serverTime: this.questionStartAt,
+      endsAt: this.getAnswerEndsAt(),
       options:
         qData.type === 'order' || qData.type === 'poll' || this.options.showQuestionOnPlayer
           ? this.currentShuffledOptions
@@ -583,8 +718,9 @@ export class Room {
       const elapsed = Date.now() - this.questionStartAt - this.totalPausedMs;
       const remainingMs = Math.max(this.questionDurationMs - elapsed, 0);
 
-      this.io.to(this.hostRoomName).emit('room:paused', { paused: false, remainingMs });
-      this.io.to(this.socketRoomName).emit('room:paused', { paused: false, remainingMs });
+      const endsAt = this.getAnswerEndsAt();
+      this.io.to(this.hostRoomName).emit('room:paused', { paused: false, remainingMs, endsAt });
+      this.io.to(this.socketRoomName).emit('room:paused', { paused: false, remainingMs, endsAt });
 
       this.answerTimer = setTimeout(() => {
         void this.revealCurrentQuestion();
@@ -597,11 +733,44 @@ export class Room {
       this.openAnsweringPhase();
     } else if (this.state === 'ANSWERING') {
       void this.revealCurrentQuestion();
-    } else if (this.state === 'REVEAL') {
+    } else if (this.state === 'REVEAL' || this.state === 'SCRIPTURE' || this.state === 'LEADERBOARD') {
+      this.nextPhase();
+    }
+  }
+
+  /** Nút "Tiếp" của người dẫn: Đáp án → (Chia sẻ Lời Chúa) → Bảng xếp hạng → Câu tiếp theo */
+  public nextPhase(): void {
+    if (this.state === 'REVEAL') {
+      const qData = this.questions[this.currentQ];
+      if (this.options.scriptureStep && qData && (qData.verseText || qData.explanation)) {
+        this.showScripture();
+      } else {
+        this.showLeaderboard();
+      }
+    } else if (this.state === 'SCRIPTURE') {
       this.showLeaderboard();
     } else if (this.state === 'LEADERBOARD') {
       this.advanceToNextQuestion();
     }
+  }
+
+  /** Bước "Chia sẻ Lời Chúa": chiếu câu gốc toàn màn hình & gửi xuống điện thoại mọi người */
+  public showScripture(): void {
+    if (this.state !== 'REVEAL') return;
+    const qData = this.questions[this.currentQ];
+    if (!qData) return;
+    this.state = 'SCRIPTURE';
+    const payload: ScripturePayload = {
+      q: this.currentQ,
+      content: qData.content,
+      bibleReference: qData.bibleReference,
+      verseText: qData.verseText,
+      explanation: qData.explanation
+    };
+    this.lastScripture = payload;
+    this.io.to(this.hostRoomName).emit('scripture:show', payload);
+    this.io.to(this.socketRoomName).emit('scripture:show', payload);
+    void saveRoomSnapshotToRedis(this);
   }
 
   public submitPlayerAnswer(
@@ -822,6 +991,7 @@ export class Room {
       explanation: qData.explanation
     };
 
+    this.lastReveal = revealPayload;
     this.io.to(this.hostRoomName).emit('question:reveal', revealPayload);
 
     for (const player of this.players.values()) {
@@ -918,6 +1088,7 @@ export class Room {
       teamStandings: this.options.mode === 'team' ? this.getTeamStandings() : undefined
     };
 
+    this.lastLeaderboard = payload;
     this.io.to(this.hostRoomName).emit('leaderboard', payload);
     void saveRoomSnapshotToRedis(this);
   }
@@ -947,25 +1118,12 @@ export class Room {
       totalQuestions: this.questions.length
     };
 
+    this.lastPodium = hostPodium;
     this.io.to(this.hostRoomName).emit('game:podium', hostPodium);
 
     for (const player of this.players.values()) {
       if (!player.socketId || !player.connected) continue;
-      const hideLowRank = this.options.friendlyMode && player.rank > 5;
-      this.io.to(player.socketId).emit('game:podium', {
-        ...hostPodium,
-        personalResult: {
-          rank: hideLowRank ? null : player.rank,
-          friendlyRankText: hideLowRank
-            ? player.rank <= 10
-              ? 'Trong Top 10 Chung Cuộc!'
-              : 'Hoàn thành xuất sắc!'
-            : null,
-          score: player.score,
-          correctCount: player.correctCount,
-          totalQuestions: this.questions.length
-        }
-      });
+      this.io.to(player.socketId).emit('game:podium', this.buildPlayerPodiumPayload(player));
     }
 
     // Lưu MySQL & Redis bất đồng bộ, có bắt lỗi đầy đủ (Sửa lỗi #7 & #18)
@@ -973,6 +1131,61 @@ export class Room {
       finalizeGameSessionInMySQL(this),
       saveRoomSnapshotToRedis(this)
     ]);
+  }
+
+  /** Gói bục vinh danh riêng từng người: kèm thứ hạng thân thiện & màn xem lại từng câu */
+  public buildPlayerPodiumPayload(player: Player): PodiumPayload {
+    const base: PodiumPayload = this.lastPodium ?? {
+      sessionId: this.sessionId ?? 0,
+      quizTitle: this.quizTitle,
+      top3: this.getLeaderboardEntries(3),
+      top5: this.getLeaderboardEntries(5),
+      totalPlayers: this.players.size,
+      totalQuestions: this.questions.length
+    };
+    const hideLowRank = this.options.friendlyMode && player.rank > 5;
+    return {
+      ...base,
+      personalResult: {
+        rank: hideLowRank ? null : player.rank,
+        friendlyRankText: hideLowRank
+          ? player.rank <= 10
+            ? 'Trong Top 10 Chung Cuộc!'
+            : 'Hoàn thành xuất sắc!'
+          : null,
+        score: player.score,
+        correctCount: player.correctCount,
+        totalQuestions: this.questions.length
+      },
+      review: this.buildPersonalReview(player)
+    };
+  }
+
+  /** Màn xem lại cá nhân: chỉ gồm các câu đã thực sự được hỏi trong trận */
+  public buildPersonalReview(player: Player): PersonalReviewItem[] {
+    const lastAsked = Math.min(this.currentQ, this.questions.length - 1);
+    const items: PersonalReviewItem[] = [];
+    for (let i = 0; i <= lastAsked; i++) {
+      const qData = this.questions[i];
+      if (!qData) continue;
+      const rec = player.answers.get(i);
+      const isPoll = qData.type === 'poll';
+      items.push({
+        q: i,
+        type: qData.type,
+        content: qData.content,
+        answered: Boolean(rec),
+        correct: Boolean(rec?.isCorrect) && !isPoll,
+        isPoll,
+        points: rec?.points ?? 0,
+        yourAnswer: rec ? this.describePlayerAnswer(qData, rec) : null,
+        correctAnswer: this.describeCorrectAnswer(qData),
+        bibleReference: qData.bibleReference,
+        verseText: qData.verseText,
+        explanation: qData.explanation
+      });
+    }
+    return items;
   }
 
   public clearTimers(): void {

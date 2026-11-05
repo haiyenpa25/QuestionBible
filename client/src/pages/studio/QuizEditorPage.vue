@@ -33,6 +33,7 @@ interface QuestionItem {
   verseTo: number | null;
   verseText: string | null;
   explanation: string | null;
+  hostNotes?: string | null;
   difficulty: number;
   sliderMin: number | null;
   sliderMax: number | null;
@@ -73,6 +74,7 @@ const qVerseFrom = ref<number | null>(1);
 const qVerseTo = ref<number | null>(null);
 const qVerseText = ref('');
 const qExplanation = ref('');
+const qHostNotes = ref('');
 const qDifficulty = ref(2);
 const qTagsText = ref('Cựu Ước; Nhân vật');
 const qSliderMin = ref(0);
@@ -114,6 +116,7 @@ function resetQuestionForm() {
   qVerseTo.value = null;
   qVerseText.value = '';
   qExplanation.value = '';
+  qHostNotes.value = '';
   qDifficulty.value = 2;
   qOptions.value = [
     { content: '', isCorrect: true },
@@ -154,6 +157,7 @@ function editQuestion(q: QuestionItem) {
   qVerseTo.value = q.verseTo;
   qVerseText.value = q.verseText ?? '';
   qExplanation.value = q.explanation ?? '';
+  qHostNotes.value = q.hostNotes ?? '';
   qDifficulty.value = q.difficulty;
   qTagsText.value = (q.tags ?? []).join('; ');
   qSliderMin.value = q.sliderMin ?? 0;
@@ -219,6 +223,7 @@ async function saveQuestion() {
     verseTo: qVerseTo.value,
     verseText: qVerseText.value.trim() || null,
     explanation: qExplanation.value.trim() || null,
+    hostNotes: qHostNotes.value.trim() || null,
     difficulty: qDifficulty.value,
     sliderMin: qType.value === 'slider' ? qSliderMin.value : null,
     sliderMax: qType.value === 'slider' ? qSliderMax.value : null,
@@ -730,6 +735,19 @@ onMounted(() => {
                   v-model="qExplanation"
                   rows="2"
                   placeholder="Ý nghĩa thuộc linh hoặc bối cảnh Kinh Thánh..."
+                  class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-white"
+                />
+              </div>
+
+              <div>
+                <label class="block text-[11px] font-bold text-slate-400 mb-1">
+                  🔒 Ghi chú riêng cho người dẫn (chỉ hiện trên điện thoại điều khiển, không chiếu)
+                </label>
+                <textarea
+                  v-model="qHostNotes"
+                  rows="2"
+                  maxlength="2000"
+                  placeholder="VD: Hỏi thêm cả hội chúng: 'Có ai từng được Chúa cứu như Giô-na không?' — chia sẻ 1 phút."
                   class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-white"
                 />
               </div>

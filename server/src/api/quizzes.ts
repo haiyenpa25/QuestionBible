@@ -331,6 +331,7 @@ export async function registerQuizRoutes(app: FastifyInstance): Promise<void> {
             verseTo: q.verseTo,
             verseText: q.verseText,
             explanation: q.explanation,
+            hostNotes: q.hostNotes,
             difficulty: q.difficulty,
             sliderMin: q.sliderMin,
             sliderMax: q.sliderMax,

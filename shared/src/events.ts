@@ -11,6 +11,7 @@ export type RoomState =
   | 'QUESTION_INTRO'
   | 'ANSWERING'
   | 'REVEAL'
+  | 'SCRIPTURE' // Bước "Chia sẻ Lời Chúa" giữa Đáp án và Bảng xếp hạng
   | 'LEADERBOARD'
   | 'PODIUM'
   | 'ENDED';
@@ -25,6 +26,7 @@ export interface RoomOptions {
   showQuestionOnPlayer: boolean; // Hiện nội dung câu hỏi trên điện thoại cho người ngồi xa
   partialOrderScoring: boolean; // Chấm điểm từng phần cho câu sắp xếp (>= 50% vị trí đúng)
   randomBibleNickname: boolean; // Bắt buộc / gợi ý biệt danh nhân vật Kinh Thánh
+  scriptureStep: boolean; // Thêm bước "Chia sẻ Lời Chúa" sau mỗi câu có câu gốc / bài học
   openingPrayerOrVerse?: string; // Câu Kinh Thánh / lời cầu nguyện mở đầu ở sảnh chờ
   teams?: string[];
 }
@@ -82,6 +84,7 @@ export interface QuestionStartPayload {
   q: number;
   duration: number;
   serverTime: number;
+  endsAt: number; // Mốc giờ server (epoch ms) hết giờ trả lời — client tự tính còn lại theo đồng hồ server
   options?: QuestionOptionView[];
 }
 
@@ -102,6 +105,45 @@ export interface QuestionRevealPayload {
   sliderTolerance?: number | null;
   optionCounts: number[];
   totalAnswered: number;
+  bibleReference?: string | null;
+  verseText?: string | null;
+  explanation?: string | null;
+}
+
+export interface RoomPausedPayload {
+  paused: boolean;
+  remainingMs: number;
+  endsAt?: number; // Có khi tiếp tục: mốc hết giờ mới theo giờ server
+}
+
+/** Bước "Chia sẻ Lời Chúa": chiếu câu gốc cho cả hội trường & điện thoại */
+export interface ScripturePayload {
+  q: number;
+  content: string;
+  bibleReference?: string | null;
+  verseText?: string | null;
+  explanation?: string | null;
+}
+
+/** Chỉ gửi cho điện thoại điều khiển (không gửi màn chiếu / người chơi) */
+export interface RemoteAnswerKeyPayload {
+  q: number;
+  type: QuizQuestionType;
+  correctText: string; // Đáp án đúng đã diễn giải thành chữ
+  hostNotes?: string | null;
+}
+
+/** Một dòng trong màn hình xem lại cá nhân cuối trận */
+export interface PersonalReviewItem {
+  q: number;
+  type: QuizQuestionType;
+  content: string;
+  answered: boolean;
+  correct: boolean;
+  isPoll: boolean;
+  points: number;
+  yourAnswer: string | null;
+  correctAnswer: string;
   bibleReference?: string | null;
   verseText?: string | null;
   explanation?: string | null;
@@ -169,7 +211,30 @@ export interface PodiumPayload {
     correctCount: number;
     totalQuestions: number;
   };
+  review?: PersonalReviewItem[]; // Chỉ có trong gói gửi riêng từng người chơi
 }
+
+/** Gói đồng bộ đầy đủ cho màn chiếu / điều khiển khi vào giữa trận hoặc tải lại trang */
+export interface HostSyncPayload {
+  pin: string;
+  quizTitle: string;
+  totalQuestions: number;
+  state: RoomState;
+  paused: boolean;
+  remainingMs: number;
+  endsAt: number | null;
+  answered: number;
+  totalPlayers: number;
+  lobby: LobbyUpdatePayload;
+  intro: QuestionIntroHostPayload | null;
+  reveal: QuestionRevealPayload | null;
+  scripture: ScripturePayload | null;
+  leaderboard: LeaderboardPayload | null;
+  podium: PodiumPayload | null;
+  answerKey?: RemoteAnswerKeyPayload | null; // Chỉ có với điện thoại điều khiển
+}
+
+export type HostViewRole = 'control' | 'screen';
 
 export interface HostCreateAck {
   ok: boolean;
@@ -178,6 +243,13 @@ export interface HostCreateAck {
   quizTitle?: string;
   totalQuestions?: number;
   options?: RoomOptions;
+  remoteKey?: string; // Khoá bí mật để ghép điện thoại điều khiển (chỉ trả về cho chủ phòng)
+  error?: string;
+}
+
+export interface RemoteAttachAck {
+  ok: boolean;
+  sync?: HostSyncPayload;
   error?: string;
 }
 
@@ -210,9 +282,10 @@ export interface ClientToServerEvents {
     ack: (res: HostCreateAck) => void
   ) => void;
   'host:rejoin': (
-    data: { pin: string },
-    ack: (res: HostCreateAck & { state?: RoomState; lobby?: LobbyUpdatePayload }) => void
+    data: { pin: string; role?: HostViewRole },
+    ack: (res: HostCreateAck & { state?: RoomState; lobby?: LobbyUpdatePayload; sync?: HostSyncPayload }) => void
   ) => void;
+  'remote:attach': (data: { pin: string; key: string }, ack: (res: RemoteAttachAck) => void) => void;
   'host:start': (data: { pin?: string }) => void;
   'host:next': (data: { pin?: string }) => void;
   'host:skip': (data: { pin?: string }) => void;
@@ -242,7 +315,10 @@ export interface ServerToClientEvents {
   'lobby:update': (payload: LobbyUpdatePayload) => void;
   'question:intro': (payload: QuestionIntroHostPayload | QuestionIntroPlayerPayload) => void;
   'question:start': (payload: QuestionStartPayload) => void;
-  'room:paused': (payload: { paused: boolean; remainingMs: number }) => void;
+  'room:paused': (payload: RoomPausedPayload) => void;
+  'scripture:show': (payload: ScripturePayload) => void;
+  'remote:answer-key': (payload: RemoteAnswerKeyPayload) => void;
+  'host:sync': (payload: HostSyncPayload) => void;
   'answer:count': (payload: AnswerCountPayload) => void;
   'answer:ack': (payload: { received: boolean; q: number }) => void;
   'question:reveal': (payload: QuestionRevealPayload) => void;

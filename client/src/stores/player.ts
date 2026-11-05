@@ -6,9 +6,11 @@ import type {
   QuestionIntroPlayerPayload,
   PlayerResultPayload,
   PodiumPayload,
-  PlayerAnswerPayload
+  PlayerAnswerPayload,
+  ScripturePayload
 } from '@questionbible/shared';
 import { getSocket } from '../socket';
+import { createServerCountdown } from '../utils/serverClock';
 
 const STORAGE_PIN_KEY = 'qb_player_pin';
 const STORAGE_TOKEN_KEY = 'qb_player_token';
@@ -45,7 +47,10 @@ export const usePlayerStore = defineStore('player', () => {
   const rank = ref<number | null>(1);
 
   const currentQuestion = ref<QuestionIntroPlayerPayload | null>(null);
-  const remainingSeconds = ref(0);
+  // Đồng hồ theo giờ server: tắt màn hình / chuyển app rồi mở lại vẫn hiện đúng số giây
+  const countdown = createServerCountdown();
+  const remainingSeconds = countdown.remainingSeconds;
+  const scriptureData = ref<ScripturePayload | null>(null);
   const hasSubmitted = ref(false);
   const lastResult = ref<PlayerResultPayload | null>(null);
   const podiumData = ref<PodiumPayload | null>(null);
@@ -53,7 +58,6 @@ export const usePlayerStore = defineStore('player', () => {
   const errorMsg = ref<string | null>(null);
   const nameSuggestions = ref<string[]>([]);
 
-  let timerInterval: ReturnType<typeof setInterval> | null = null;
   let listenersAttached = false;
   let wakeLockSentinel: WakeLockSentinel | null = null;
 
@@ -78,23 +82,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function clearTimer() {
-    if (timerInterval) {
-      clearInterval(timerInterval);
-      timerInterval = null;
-    }
-  }
-
-  function startTimer(sec: number) {
-    clearTimer();
-    remainingSeconds.value = sec;
-    timerInterval = setInterval(() => {
-      if (paused.value) return;
-      if (remainingSeconds.value > 0) {
-        remainingSeconds.value -= 1;
-      } else {
-        clearTimer();
-      }
-    }, 1000);
+    countdown.stop();
   }
 
   function bindSocketListeners() {
@@ -111,6 +99,7 @@ export const usePlayerStore = defineStore('player', () => {
       currentQuestion.value = payload;
       hasSubmitted.value = false;
       lastResult.value = null;
+      scriptureData.value = null;
       vibrate(40);
     });
 
@@ -120,14 +109,22 @@ export const usePlayerStore = defineStore('player', () => {
       if (currentQuestion.value && payload.options) {
         currentQuestion.value.options = payload.options;
       }
-      startTimer(payload.duration);
+      countdown.start(payload.endsAt ?? Date.now() + payload.duration * 1000);
       vibrate([50, 40, 50]);
     });
 
     // Sửa lỗi #13: Đồng bộ trạng thái tạm dừng từ Host xuống điện thoại người chơi
     socket.on('room:paused', (payload) => {
       paused.value = payload.paused;
-      remainingSeconds.value = Math.ceil(payload.remainingMs / 1000);
+      if (payload.paused || !payload.endsAt) countdown.freeze(payload.remainingMs);
+      else countdown.start(payload.endsAt);
+    });
+
+    socket.on('scripture:show', (payload) => {
+      clearTimer();
+      state.value = 'SCRIPTURE';
+      scriptureData.value = payload;
+      vibrate(30);
     });
 
     socket.on('answer:ack', (payload) => {
@@ -152,7 +149,7 @@ export const usePlayerStore = defineStore('player', () => {
       paused.value = false;
       state.value = 'PODIUM';
       podiumData.value = payload;
-      localStorage.removeItem(STORAGE_TOKEN_KEY);
+      // Giữ token để tải lại trang vẫn xem lại được kết quả cá nhân; xoá khi bấm "Chơi trận khác"
       vibrate([100, 60, 100, 60, 200]);
     });
 
@@ -310,6 +307,7 @@ export const usePlayerStore = defineStore('player', () => {
     rank,
     currentQuestion,
     remainingSeconds,
+    scriptureData,
     hasSubmitted,
     lastResult,
     podiumData,

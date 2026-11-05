@@ -101,6 +101,7 @@ export async function saveRoomSnapshotToRedis(room: Room): Promise<void> {
       quizTitle: room.quizTitle,
       hostId: String(room.hostId),
       hostSocket: room.hostSocketId ?? '',
+      remoteKey: room.remoteKey,
       state: room.state,
       currentQ: String(room.currentQ),
       startAt: String(room.questionStartAt),
@@ -190,6 +191,7 @@ export async function restoreRoomsFromRedis(roomManager: RoomManager): Promise<n
         state: (roomHash.state as Room['state']) || 'LOBBY',
         currentQ: Number(roomHash.currentQ ?? -1),
         locked: roomHash.locked === '1',
+        remoteKey: roomHash.remoteKey || undefined,
         questions,
         options
       });

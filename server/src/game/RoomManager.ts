@@ -87,6 +87,7 @@ export class RoomManager {
     locked: boolean;
     questions: RoomQuestionData[];
     options?: Partial<RoomOptions>;
+    remoteKey?: string;
   }): Room {
     const room = new Room({
       pin: params.pin,
@@ -96,6 +97,7 @@ export class RoomManager {
       hostSocketId: null,
       questions: params.questions,
       options: params.options,
+      remoteKey: params.remoteKey,
       io: this.io
     });
     room.sessionId = params.sessionId;
@@ -150,6 +152,7 @@ export class RoomManager {
       }),
       verseText: q.verseText,
       explanation: q.explanation,
+      hostNotes: q.hostNotes,
       sliderMin: q.sliderMin,
       sliderMax: q.sliderMax,
       sliderAnswer: q.sliderAnswer,

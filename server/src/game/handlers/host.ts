@@ -32,7 +32,8 @@ export function registerHostHandlers(
       }
 
       const room = result.room;
-      await socket.join(room.hostRoomName);
+      // Bảng điều khiển cũng nhận đáp án & ghi chú (hiển thị ẩn, chỉ mở khi người dẫn bấm xem)
+      await socket.join([room.hostRoomName, room.remoteRoomName]);
 
       ack({
         ok: true,
@@ -40,7 +41,8 @@ export function registerHostHandlers(
         roomId: room.roomId,
         quizTitle: room.quizTitle,
         totalQuestions: room.questions.length,
-        options: room.options
+        options: room.options,
+        remoteKey: room.remoteKey
       });
 
       room.scheduleLobbyUpdate(true);
@@ -70,12 +72,16 @@ export function registerHostHandlers(
         return;
       }
 
-      if (room.hostSocketId) {
-        roomManager.hostSocketToPin.delete(room.hostSocketId);
+      // Màn chiếu riêng (role 'screen'): chỉ nhận hình ảnh, không giành quyền điều khiển của bảng điều khiển
+      const isScreen = data.role === 'screen';
+      if (!isScreen) {
+        if (room.hostSocketId && room.hostSocketId !== socket.id) {
+          roomManager.hostSocketToPin.delete(room.hostSocketId);
+        }
+        room.hostSocketId = socket.id;
+        roomManager.hostSocketToPin.set(socket.id, room.pin);
       }
-      room.hostSocketId = socket.id;
-      roomManager.hostSocketToPin.set(socket.id, room.pin);
-      await socket.join(room.hostRoomName);
+      await socket.join(isScreen ? room.hostRoomName : [room.hostRoomName, room.remoteRoomName]);
 
       ack({
         ok: true,
@@ -84,8 +90,10 @@ export function registerHostHandlers(
         quizTitle: room.quizTitle,
         totalQuestions: room.questions.length,
         options: room.options,
+        remoteKey: isScreen ? undefined : room.remoteKey,
         state: room.state,
-        lobby: room.getLobbyPayload()
+        lobby: room.getLobbyPayload(),
+        sync: room.getHostSyncPayload(!isScreen)
       });
     } catch (err) {
       console.error('Lỗi host:rejoin:', err);
@@ -93,11 +101,34 @@ export function registerHostHandlers(
     }
   });
 
+  // Điện thoại điều khiển: quét QR trên bảng điều khiển (chứa remoteKey bí mật), không cần đăng nhập
+  socket.on('remote:attach', async (data, ack) => {
+    if (typeof ack !== 'function') return;
+    try {
+      const room = roomManager.getRoomByPin(String(data?.pin ?? ''));
+      if (!room || !room.isRemoteKeyValid(data?.key)) {
+        ack({ ok: false, error: 'Mã điều khiển không hợp lệ hoặc phòng đã đóng.' });
+        return;
+      }
+      if (room.remoteSockets.size >= 5 && !room.remoteSockets.has(socket.id)) {
+        ack({ ok: false, error: 'Phòng đã có đủ 5 thiết bị điều khiển.' });
+        return;
+      }
+      room.remoteSockets.add(socket.id);
+      roomManager.hostSocketToPin.set(socket.id, room.pin);
+      await socket.join([room.hostRoomName, room.remoteRoomName]);
+      ack({ ok: true, sync: room.getHostSyncPayload(true) });
+    } catch (err) {
+      console.error('Lỗi remote:attach:', err);
+      ack({ ok: false, error: 'Lỗi khi ghép điện thoại điều khiển.' });
+    }
+  });
+
   socket.on('host:start', (data) => {
     const room = data?.pin
       ? roomManager.getRoomByPin(data.pin)
       : roomManager.getRoomByHostSocket(socket.id);
-    if (!room || room.hostSocketId !== socket.id) return;
+    if (!room || !room.canControl(socket.id)) return;
     room.startGame();
   });
 
@@ -105,20 +136,15 @@ export function registerHostHandlers(
     const room = data?.pin
       ? roomManager.getRoomByPin(data.pin)
       : roomManager.getRoomByHostSocket(socket.id);
-    if (!room || room.hostSocketId !== socket.id) return;
-
-    if (room.state === 'REVEAL') {
-      room.showLeaderboard();
-    } else if (room.state === 'LEADERBOARD') {
-      room.advanceToNextQuestion();
-    }
+    if (!room || !room.canControl(socket.id)) return;
+    room.nextPhase();
   });
 
   socket.on('host:skip', (data) => {
     const room = data?.pin
       ? roomManager.getRoomByPin(data.pin)
       : roomManager.getRoomByHostSocket(socket.id);
-    if (!room || room.hostSocketId !== socket.id) return;
+    if (!room || !room.canControl(socket.id)) return;
     room.skipCurrentPhase();
   });
 
@@ -126,7 +152,7 @@ export function registerHostHandlers(
     const room = data?.pin
       ? roomManager.getRoomByPin(data.pin)
       : roomManager.getRoomByHostSocket(socket.id);
-    if (!room || room.hostSocketId !== socket.id) return;
+    if (!room || !room.canControl(socket.id)) return;
     room.togglePause();
   });
 
@@ -134,26 +160,26 @@ export function registerHostHandlers(
     const room = data?.pin
       ? roomManager.getRoomByPin(data.pin)
       : roomManager.getRoomByHostSocket(socket.id);
-    if (!room || room.hostSocketId !== socket.id) return;
+    if (!room || !room.canControl(socket.id)) return;
     void room.showPodium().catch((err) => console.error('Lỗi showPodium:', err));
   });
 
   socket.on('host:kick', (data) => {
     const room = roomManager.getRoomByHostSocket(socket.id);
-    if (!room || room.hostSocketId !== socket.id) return;
+    if (!room || !room.canControl(socket.id)) return;
     room.kickPlayer(data.playerId, Boolean(data.banDevice));
   });
 
   socket.on('host:lock', (data) => {
     const room = roomManager.getRoomByHostSocket(socket.id);
-    if (!room || room.hostSocketId !== socket.id) return;
+    if (!room || !room.canControl(socket.id)) return;
     room.locked = Boolean(data.locked);
     room.scheduleLobbyUpdate(true);
   });
 
   socket.on('host:update-options', (data) => {
     const room = roomManager.getRoomByHostSocket(socket.id);
-    if (!room || room.hostSocketId !== socket.id) return;
+    if (!room || !room.canControl(socket.id)) return;
     room.updateOptions(data.options);
   });
 }

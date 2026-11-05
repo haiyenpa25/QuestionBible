@@ -111,6 +111,7 @@ model Question {
   verseTo         Int?             @map("verse_to") @db.UnsignedSmallInt
   verseText       String?          @map("verse_text") @db.Text
   explanation     String?          @db.Text
+  hostNotes       String?          @map("host_notes") @db.Text
   difficulty      Int              @default(2) @db.UnsignedTinyInt
   sliderMin       Int?             @map("slider_min")
   sliderMax       Int?             @map("slider_max")

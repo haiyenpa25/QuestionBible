@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { generateBibleNickname } from '@questionbible/shared';
 import { usePlayerStore } from '../../stores/player';
@@ -19,6 +19,14 @@ async function pickSuggestion(suggestedName: string) {
   nicknameInput.value = suggestedName;
   await handleJoin();
 }
+
+// Màn xem lại cá nhân cuối trận
+const reviewFilter = ref<'wrong' | 'all'>('wrong');
+const reviewItems = computed(() => player.podiumData?.review ?? []);
+const wrongCount = computed(() => reviewItems.value.filter((i) => !i.isPoll && !i.correct).length);
+const filteredReview = computed(() =>
+  reviewFilter.value === 'all' ? reviewItems.value : reviewItems.value.filter((i) => !i.isPoll && !i.correct)
+);
 
 // Trạng thái trả lời cho các loại câu hỏi đặc biệt
 const typedAnswer = ref('');
@@ -518,7 +526,7 @@ onMounted(async () => {
 
     <!-- 5. KẾT QUẢ SAU MỖI CÂU (REVEAL / LEADERBOARD) -->
     <main
-      v-else-if="(player.state === 'REVEAL' || player.state === 'LEADERBOARD') && player.lastResult"
+      v-else-if="(player.state === 'REVEAL' || player.state === 'LEADERBOARD' || (player.state === 'SCRIPTURE' && !player.scriptureData)) && player.lastResult"
       class="flex-1 flex flex-col items-center justify-center p-4 sm:p-6"
     >
       <div class="max-w-lg w-full rounded-2xl border border-slate-800 bg-slate-900 p-6 sm:p-8 text-center space-y-5">
@@ -583,6 +591,32 @@ onMounted(async () => {
       </div>
     </main>
 
+    <!-- 5b. CHIA SẺ LỜI CHÚA (SCRIPTURE): đọc câu gốc ngay trên điện thoại -->
+    <main
+      v-else-if="player.state === 'SCRIPTURE' && player.scriptureData"
+      class="flex-1 flex flex-col items-center justify-center p-4 sm:p-6"
+    >
+      <div class="max-w-lg w-full rounded-2xl border-2 border-amber-500/40 bg-slate-900 p-6 sm:p-8 text-center space-y-5">
+        <p class="text-xs font-extrabold uppercase tracking-widest text-amber-300">📖 Chia sẻ Lời Chúa</p>
+        <blockquote
+          v-if="player.scriptureData.verseText"
+          class="font-serif italic text-xl sm:text-2xl leading-relaxed text-amber-50"
+        >
+          “{{ player.scriptureData.verseText }}”
+        </blockquote>
+        <p v-if="player.scriptureData.bibleReference" class="text-base font-extrabold text-amber-400">
+          — {{ player.scriptureData.bibleReference }} (Bản 1925) —
+        </p>
+        <p
+          v-if="player.scriptureData.explanation"
+          class="text-sm text-slate-200 text-left rounded-xl bg-slate-950 border border-slate-800 p-4"
+        >
+          💡 {{ player.scriptureData.explanation }}
+        </p>
+        <p class="text-xs text-slate-400">Cùng lắng nghe người dẫn chia sẻ...</p>
+      </div>
+    </main>
+
     <!-- 6. BỤC VINH DANH CUỐI TRẬN (PODIUM) -->
     <main
       v-else-if="player.state === 'PODIUM' && player.podiumData"
@@ -604,14 +638,76 @@ onMounted(async () => {
           class="rounded-xl bg-slate-950 border border-slate-800 p-5 space-y-3"
         >
           <p class="text-sm text-slate-400">Thành tích của {{ player.nickname }}</p>
-          <div class="text-4xl font-black text-amber-400">
+          <div v-if="player.podiumData.personalResult.rank !== null" class="text-4xl font-black text-amber-400">
             Hạng #{{ player.podiumData.personalResult.rank }}
+          </div>
+          <div v-else class="text-2xl font-black text-emerald-400">
+            {{ player.podiumData.personalResult.friendlyRankText || 'Hoàn thành xuất sắc!' }}
           </div>
           <div class="flex justify-center gap-6 text-sm font-bold text-slate-200 pt-2">
             <span>Tổng điểm: {{ player.podiumData.personalResult.score.toLocaleString('vi-VN') }}</span>
             <span>
               Đúng: {{ player.podiumData.personalResult.correctCount }}/{{ player.podiumData.personalResult.totalQuestions }} câu
             </span>
+          </div>
+        </div>
+
+        <!-- Màn xem lại cá nhân: ôn lại câu sai kèm câu Kinh Thánh -->
+        <div v-if="reviewItems.length" class="text-left space-y-3">
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="text-sm font-extrabold text-white">📚 Xem lại & ôn Lời Chúa</h2>
+            <div class="flex rounded-lg border border-slate-700 overflow-hidden text-[11px] font-bold">
+              <button
+                type="button"
+                class="px-2.5 py-1"
+                :class="reviewFilter === 'wrong' ? 'bg-amber-500 text-slate-950' : 'bg-slate-900 text-slate-300'"
+                @click="reviewFilter = 'wrong'"
+              >
+                Câu cần ôn ({{ wrongCount }})
+              </button>
+              <button
+                type="button"
+                class="px-2.5 py-1"
+                :class="reviewFilter === 'all' ? 'bg-amber-500 text-slate-950' : 'bg-slate-900 text-slate-300'"
+                @click="reviewFilter = 'all'"
+              >
+                Tất cả
+              </button>
+            </div>
+          </div>
+
+          <p v-if="filteredReview.length === 0" class="rounded-xl bg-emerald-500/10 border border-emerald-500/30 p-3 text-sm font-bold text-emerald-300 text-center">
+            🎉 Bạn trả lời đúng tất cả các câu. Tạ ơn Chúa!
+          </p>
+
+          <div
+            v-for="item in filteredReview"
+            :key="item.q"
+            class="rounded-xl border p-3.5 space-y-2"
+            :class="item.isPoll ? 'border-slate-700 bg-slate-950' : item.correct ? 'border-emerald-500/30 bg-emerald-950/30' : 'border-red-500/30 bg-red-950/20'"
+          >
+            <p class="text-sm font-bold text-white">
+              <span class="mr-1">{{ item.isPoll ? '🗳️' : item.correct ? '✅' : '❌' }}</span>
+              Câu {{ item.q + 1 }}. {{ item.content }}
+            </p>
+            <p v-if="!item.isPoll" class="text-xs text-slate-300">
+              Bạn chọn:
+              <strong :class="item.correct ? 'text-emerald-300' : 'text-red-300'">
+                {{ item.answered ? item.yourAnswer || '(trống)' : 'Không kịp trả lời' }}
+              </strong>
+              <span v-if="item.points > 0" class="text-amber-400 font-bold"> · +{{ item.points.toLocaleString('vi-VN') }} đ</span>
+            </p>
+            <p v-if="!item.isPoll && !item.correct" class="text-xs text-slate-300">
+              Đáp án đúng: <strong class="text-emerald-300">{{ item.correctAnswer }}</strong>
+            </p>
+            <div
+              v-if="item.verseText || item.bibleReference"
+              class="rounded-lg bg-amber-500/10 border border-amber-500/20 p-2.5 space-y-1"
+            >
+              <p v-if="item.bibleReference" class="text-[11px] font-extrabold text-amber-300 uppercase">📖 {{ item.bibleReference }}</p>
+              <p v-if="item.verseText" class="font-serif italic text-xs text-amber-50">“{{ item.verseText }}”</p>
+            </div>
+            <p v-if="item.explanation" class="text-xs text-slate-400">💡 {{ item.explanation }}</p>
           </div>
         </div>
 

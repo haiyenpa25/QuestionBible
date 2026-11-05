@@ -26,6 +26,19 @@ export const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      // Màn chiếu riêng cho máy chiếu: mở từ bảng điều khiển, cùng tài khoản đăng nhập
+      path: '/screen/:pin',
+      name: 'screen',
+      component: () => import('./pages/host/HostGamePage.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      // Điện thoại điều khiển: ghép bằng QR chứa khoá bí mật, không cần đăng nhập
+      path: '/remote/:pin',
+      name: 'remote',
+      component: () => import('./pages/host/RemoteControlPage.vue')
+    },
+    {
       path: '/studio',
       name: 'studio',
       component: () => import('./pages/studio/StudioDashboard.vue')

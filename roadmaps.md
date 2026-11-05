@@ -6,6 +6,133 @@
 
 ---
 
+## 0. ĐÁNH GIÁ LẠI LẦN 2 (04/11/2026, sau commit `a7b5045`)
+
+> Commit ghi "complete roadmap P0/P1 fixes". Tôi không dựa vào lời ghi đó mà **đọc lại code từng mục** và chạy kiểm chứng trên server dev đang chạy ở cổng 3000:
+> - `npm test`: 5/5 pass; `tsc --noEmit` (server): sạch
+> - `loadtest/verify-300-wifi-players.mjs`: **300/300 người cùng 1 IP vào phòng trong 697ms**, 300/300 câu trả lời được nhận trong 74ms, bục vinh danh phát trong 2ms
+> - Viết thêm phép thử riêng: **phát hiện 3 lỗi mới** (N1, N2, N3 bên dưới)
+>
+> Lưu ý: các phép thử đã tạo vài phiên chơi và khoảng 360 dòng người chơi giả trong CSDL dev.
+
+### 0.1. Bảng điểm cập nhật
+
+| Hạng mục | Lần 1 | Lần 2 | Nhận xét |
+|---|---|---|---|
+| Kiến trúc tổng thể | 8 | **8** | Giữ nguyên, tốt |
+| Logic game / tính điểm | 7 | **7,5** | Poll, sắp xếp, tạm dừng đã sửa; còn lỗi "kết thúc sớm mất điểm" |
+| Độ bền khi chạy thật | 4 | **6,5** | Đã bắt lỗi, có khôi phục, có dọn phòng; khôi phục còn dang dở |
+| Bảo mật | 3 | **6,5** | Phân quyền API đã đúng; còn mật khẩu seed cố định, thiếu kiểm tra dữ liệu gửi lên |
+| Sẵn sàng 300 người / 1 địa điểm | 3 | **7** | Đã chứng minh 300 người cùng IP; còn lỗi spam bot và giới hạn sai PIN |
+| Trình soạn câu hỏi | 5 | **5,5** | Đã có nút tải ảnh; chưa có media khác, kho câu hỏi, công cụ Kinh Thánh |
+| Trải nghiệm người chơi | 7 | **7,5** | Gợi ý tên khi trùng, deviceId, chế độ thân thiện, `/play/:pin` |
+
+**Kết luận lần 2**: tiến bộ rõ, khoảng **70% mục P0/P1 đã sửa đúng**. Còn **6 việc phải làm trước buổi 300 người** (mục 0.4). Ước tính **3–4 ngày** công.
+
+### 0.2. Kiểm chứng 24 mục lỗi lần 1
+
+✅ đã sửa đúng · ⚠️ sửa một phần · ❌ chưa làm
+
+| # | Mục | Kết quả | Ghi chú kiểm chứng |
+|---|---|---|---|
+| 1 | Giới hạn theo IP | ✅ | Đã chạy test: 300/300 vào từ cùng 1 IP. Xem thêm N8 về giới hạn sai PIN |
+| 2 | Tài khoản demo | ⚠️ | Nút demo đã ẩn ở production, **nhưng seed vẫn tạo `Admin@123` / `Host@123` cố định** ([seed/index.ts:26](server/prisma/seed/index.ts#L26)). Chạy seed trên VPS là có ngay tài khoản admin với mật khẩu ai cũng biết |
+| 3 | IDOR câu hỏi/import/báo cáo | ✅ | `assertCanEditQuiz` dùng ở mọi route; báo cáo kiểm tra `hostId` |
+| 4 | Chiếm phòng qua `host:rejoin` | ✅ | Đã chạy test: tài khoản khác bị từ chối |
+| 5 | Trang admin status | ✅ | Đã kiểm tra role |
+| 6 | Câu sắp xếp lộ đáp án | ✅ | Dùng id hiển thị 0..n-1 + bảng ánh xạ ẩn trên server; người vào muộn nhận đúng bản đã xáo trộn |
+| 7 | Promise lỗi làm sập server | ✅ | Mọi hàm ghi DB/Redis có `try/catch`, có handler toàn cục. Xem N3 |
+| 8 | Khôi phục từ Redis | ⚠️ | Đã có `restoreRoomsFromRedis`, nhưng phòng khôi phục **không có đồng hồ chạy lại** (xem N4) |
+| 9 | Upload SVG | ✅ | Kiểm tra magic bytes, bỏ SVG. Chưa chuyển ảnh sang WebP / thu nhỏ |
+| 10 | Cấu hình production | ⚠️ | Đã: nghe trên `127.0.0.1`, chỉ tin XFF từ localhost, bắt buộc JWT secret, cookie `secure`. Còn: **token vẫn trả trong body và lưu `localStorage`** ([auth.ts:125](server/src/api/auth.ts#L125)); CORS `origin: true` |
+| 11 | Bộ lọc biệt danh | ✅ | Tên thật không còn bị chặn. Đổi lại bị lọt từ tục không dấu (xem N11) |
+| 12 | Trùng bản ghi người chơi | ✅ | Dùng `dbReadyPromise` |
+| 13 | Đồng hồ khi tạm dừng | ⚠️ | Đã nghe `room:paused`. Đồng hồ vẫn tự trừ 1 mỗi giây ở client, **lệch khi điện thoại khoá màn hình** (trình duyệt làm chậm `setInterval` ở nền) |
+| 14 | Vào lại lúc REVEAL | ✅ | Gửi lại `player:result` |
+| 15 | Poll cộng điểm | ✅ | |
+| 16 | Sắp xếp chấm từng phần | ⚠️ | `scoring.ts` đúng, nhưng [Room.ts:788](server/src/game/Room.ts#L788) vẫn **tăng streak từ 0 lên 1** khi chỉ đúng một phần; khi tắt streak thì streak hiển thị kẹt ở 1. Nên gán thẳng `player.streak = scoreResult.newStreak` |
+| 17 | Dọn phòng | ⚠️ | Có dọn phòng LOBBY và PODIUM. **Phòng bỏ dở giữa trận không bao giờ được dọn**; phòng PODIUM khôi phục từ Redis có `endedAtMs = null` nên cũng không được dọn ([RoomManager.ts:214](server/src/game/RoomManager.ts#L214)) |
+| 18 | Podium chạy trùng / chậm | ✅ | Đã chạy test: phát trong 2ms, ghi DB ở nền |
+| 19 | Redis tự kết nối lại | ✅ | |
+| 20 | Snapshot câu hỏi | ⚠️ | Chỉ lưu nội dung + tham chiếu, **chưa lưu đáp án và đáp án đúng**, nên báo cáo cũ vẫn sai nếu sửa đáp án |
+| 21 | `friendlyMode` / `self_paced` | ⚠️ | `friendlyMode` đã hoạt động. `self_paced` **chưa có code nào** |
+| 22 | RTT do client báo | ✅ | Server tự đo bằng `server:rtt-ping` |
+| 23 | Xáo trộn đoán trước được | ✅ | Fisher-Yates + `crypto.randomInt` |
+| 24 | Git | ✅ | Có repo, mới 1 commit lớn. Nên commit nhỏ theo từng mục |
+
+### 0.3. Lỗi mới phát hiện lần này
+
+| # | Mức | Vấn đề | Bằng chứng | Cách sửa |
+|---|---|---|---|---|
+| **N1** | 🔴 | **Bấm "Kết thúc sớm" khi đang trả lời thì mất điểm câu đó.** `showPodium` không chấm câu hiện tại | **Đã chạy thử**: 4 người chọn đủ 4 đáp án (chắc chắn có người đúng), host bấm Kết thúc thì quán quân **0 điểm**. Test có sẵn của dự án cũng in "Quán quân: TínHữu_1 - 0 đ" | Tách phần chấm điểm khỏi `revealCurrentQuestion` thành `scoreCurrentQuestion()`; `showPodium` gọi hàm này nếu đang ở `ANSWERING` ([Room.ts:929](server/src/game/Room.ts#L929)) |
+| **N2** | 🔴 | **Một kết nối tạo được vô số người chơi.** Không có giới hạn số người/kết nối, cũng không có giới hạn số người/phòng | **Đã chạy thử**: 1 socket gọi `player:join` 50 lần, lobby hiện 50 người. Mã PIN chiếu công khai (hoặc livestream) nên một script là đủ làm ngập phòng. Các "người chơi ma" luôn ở trạng thái `connected` nhưng không bao giờ trả lời, nên **tính năng mở đáp án sớm không bao giờ kích hoạt** | Một socket chỉ giữ 1 người chơi ([player.ts:37](server/src/game/handlers/player.ts#L37)); giới hạn số người/phòng (vd 500, cấu hình được); giới hạn tốc độ vào theo IP ở mức cao (vd 100 lượt/10 giây) thay vì không giới hạn; kiểm tra định dạng `deviceId` (UUID) |
+| **N3** | 🟠 | **Không kiểm tra dữ liệu gửi lên qua socket.** Gửi `{ text: 123 }` cho câu gõ đáp án là ném `TypeError` | **Đã chạy thử**: `userAnswer.trim is not a function`. Server không sập chỉ vì có `process.on('uncaughtException')` nuốt lỗi; theo tài liệu Node, chạy tiếp sau lỗi này là không an toàn | Kiểm tra schema (zod/valibot) cho **mọi** sự kiện socket. `uncaughtException` thì ghi log rồi thoát để PM2 khởi động lại, kết hợp khôi phục từ Redis (sau khi sửa N4) |
+| **N4** | 🟠 | **Phòng khôi phục bị treo.** Không chạy lại hẹn giờ; `questionStartAt = 0` nên mọi câu trả lời bị từ chối "quá thời gian"; mất bảng ánh xạ câu sắp xếp | Đọc code [RoomManager.ts:79](server/src/game/RoomManager.ts#L79) | Khôi phục về trạng thái "Tạm dừng do sự cố"; host thấy nút **"Tiếp tục"**, bấm vào thì chạy lại câu hiện tại từ đầu (hoặc công bố đáp án nếu đã có người trả lời) |
+| **N5** | 🟠 | **Host mở phòng được trên bộ đề riêng tư của người khác** (và thấy hết đáp án) | `createRoom` không kiểm tra quyền ([RoomManager.ts:115](server/src/game/RoomManager.ts#L115)) | Cho phép khi là chủ bộ đề, admin/editor, hoặc bộ đề `church`/`public` đã duyệt |
+| **N6** | 🟡 | **Ghi snapshot Redis quá nhiều**: mỗi lượt vào phòng ghi lại toàn bộ câu hỏi và toàn bộ người chơi. 300 lượt vào tương đương khoảng 45.000 lần chuyển người chơi thành JSON | [Room.ts:352](server/src/game/Room.ts#L352) | Gộp ghi (debounce) 1 giây; câu hỏi chỉ ghi 1 lần lúc tạo phòng; chỉ ghi người chơi thay đổi |
+| **N7** | 🟡 | Tự bật "hiện chữ trên điện thoại" khi đủ 100 người, **ghi đè lựa chọn của host** | [Room.ts:343](server/src/game/Room.ts#L343) | Chỉ tự bật nếu host chưa chọn; nếu tự bật thì báo cho host biết |
+| **N8** | 🟡 | Giới hạn 60 lần **sai PIN**/phút/IP: 300 em nhỏ chung 1 Wi-Fi gõ nhầm PIN thì **cả hội trường bị khoá 1 phút** | [config.ts:31](server/src/config.ts#L31) | Đếm theo deviceId/socket là chính; ngưỡng theo IP nâng lên khoảng 500; QR có sẵn PIN nên ít ai phải gõ tay |
+| **N9** | 🟡 | Biểu đồ đáp án trên màn host sai với câu gõ chữ/sắp xếp/thanh trượt: mọi câu đúng đều dồn vào cột 0 | [Room.ts:775](server/src/game/Room.ts#L775) | Mỗi loại câu có kiểu thống kê riêng: đúng/sai, phân bố giá trị slider, top 5 đáp án gõ nhiều nhất |
+| **N10** | 🟡 | Người bị kick vẫn ở trong room Socket.IO, vẫn nhận các sự kiện phát chung | [Room.ts:398](server/src/game/Room.ts#L398) | `io.in(socketId).socketsLeave(room)` khi kick |
+| **N11** | 🟡 | Bộ lọc tên giờ **cho lọt từ tục viết không dấu** đứng riêng ("deo", "lon", "cac"...) | [badwords-vi.ts:12](server/src/moderation/badwords-vi.ts#L12) | Thêm mức "Lọc chặt" (bật mặc định ở chế độ thiếu nhi): chặn dạng không dấu khi là **cả tên** hoặc đứng cạnh từ nhạy cảm khác; whitelist họ/tên phổ biến vẫn giữ |
+| **N12** | 🟡 | Test tự động còn mỏng: `npm test` chỉ test hàm thuần; script tải kết thúc ngay sau câu 1 nên **không bắt được N1** | `server/src/tests`, `loadtest/` | Thêm test tích hợp Socket.IO chạy **trọn 10 câu**: rớt mạng, vào lại, tạm dừng, kick, kết thúc sớm, khởi động lại server giữa trận |
+
+### 0.4. Phải làm trước buổi 300 người (3–4 ngày)
+
+1. [ ] **N1**: chấm điểm câu hiện tại khi kết thúc sớm
+2. [ ] **N2**: 1 socket = 1 người chơi; giới hạn số người/phòng; giới hạn tốc độ vào ở mức hợp lý
+3. [ ] **N3**: kiểm tra schema cho sự kiện socket
+4. [ ] **#2 / seed**: mật khẩu seed đọc từ biến môi trường, bắt đổi mật khẩu ở lần đăng nhập đầu
+5. [ ] **N4**: khôi phục về trạng thái tạm dừng, host bấm "Tiếp tục"
+6. [ ] **N12**: script diễn tập trọn trận 300 người, 10 câu, có 10% người rớt mạng rồi vào lại, chạy **trên chính VPS**
+
+Nên làm cùng đợt (nhỏ, nhanh): #16 (streak), #17 (dọn phòng giữa trận), N5, N8, N10.
+
+### 0.5. Cần thêm tính năng gì, cải tiến gì
+
+Thứ tự ưu tiên theo **giá trị cho buổi sinh hoạt thật / công sức bỏ ra**:
+
+| Ưu tiên | Tính năng / cải tiến | Vì sao | Công sức |
+|---|---|---|---|
+| 1 ✅ | **Điều khiển bằng điện thoại + tách màn chiếu/bảng điều khiển** | Người dẫn đứng trên bục, không lộ đáp án lên máy chiếu. Đây là nhu cầu số 1 ở nhà thờ | 3–4 ngày |
+| 2 ✅ | **Bước "Chia sẻ Lời Chúa"** sau mỗi câu + ghi chú riêng cho người dẫn | Phân biệt với Kahoot, biến trò chơi thành giờ học | 1–2 ngày |
+| 3 ✅ | **Màn hình kết quả cá nhân**: các câu sai kèm câu gốc để ôn | Người chơi mang bài học về nhà | 1–2 ngày |
+| 4 ✅ | **Đồng hồ đồng bộ server** (`serverTime` + lệch giờ đo bằng ping) | Sửa nốt #13, công bằng khi điện thoại khoá màn hình | 0,5 ngày |
+| 5 | **Nạp Kinh Thánh 1925 + ô chọn tham chiếu thông minh + tạo câu điền khuyết 1 cú bấm** | Tiết kiệm nhiều thời gian soạn nhất (mục 5.4) | 4–5 ngày |
+| 6 | **Kho câu hỏi tách khỏi bộ đề** (`quiz_items`) + tạo đề ngẫu nhiên theo bộ lọc | Soạn một lần, dùng nhiều nơi | 4–5 ngày |
+| 7 | **Âm thanh + YouTube (giây bắt đầu/kết thúc)**, preload media ở sảnh | Câu đố thánh ca, cảnh phim | 3 ngày |
+| 8 | Ảnh: chuyển WebP + thu nhỏ bằng `sharp`; ảnh làm đáp án | Nhẹ mạng, thêm dạng câu | 1–2 ngày |
+| 9 | **Chế độ tự chơi theo hạn** (`self_paced`) | Học Kinh Thánh hằng tuần ở nhà | 5–7 ngày |
+| 10 | 4 chế độ đặt tên (tự do / ngẫu nhiên bắt buộc / tên thật + lớp / duyệt tên), host đổi tên người chơi | Mục 6.5, kiểm soát buổi có khách lạ | 2 ngày |
+
+> ✅ = đã làm ngày 05/11/2026. Kiểm thử: `node loadtest/verify-remote-scripture-review.mjs`. Mục 5 và 6 tạm hoãn theo quyết định của chủ dự án.
+
+**Cải tiến kỹ thuật nên làm song song:**
+- Chuyển đăng nhập sang **chỉ cookie httpOnly** (bỏ token trong `localStorage`), CORS chỉ cho tên miền thật.
+- `prisma migrate` với thư mục migrations (hiện chỉ có `db push`, chưa có migrations).
+- **CI** (GitHub Actions): typecheck + test + build mỗi lần push.
+- Log có cấu trúc (pino của Fastify đã có sẵn) + `/api/health` kiểm tra MySQL và Redis + cảnh báo Telegram.
+- Tách file lớn: `Room.ts` (gần 1.000 dòng) thành `scoring`, `lifecycle`, `snapshot`; `HostGamePage.vue` và `QuizEditorPage.vue` thành component nhỏ.
+- Snapshot đầy đủ câu hỏi + đáp án vào phiên chơi (hoàn tất #20).
+
+### 0.6. Lộ trình cập nhật
+
+```
+Tuần:     1        2        3        4        5        6        7        8+
+Sửa nốt  ███                                                             N1–N4, seed, diễn tập trọn trận
+Chạy thử    ██                                                           Buổi thật 30–50 người
+Dẫn chương   ██████                                                      Remote, presenter view, Chia sẻ Lời Chúa, kết quả cá nhân
+Soạn đề             ████████████                                         Kinh Thánh 1925, kho câu hỏi, media
+Chế độ mới                       ████████                                Tự chơi theo hạn, chế độ đặt tên, đội
+Mở rộng                                   ████►                          PWA, giải đấu, đa hội thánh, AI gợi ý
+          ▲
+          └─ Hết tuần 1: đủ an toàn cho buổi 300 người
+```
+
+> Các mục 1–9 bên dưới là **bản đánh giá lần 1**, giữ lại để đối chiếu.
+
+---
+
 ## MỤC LỤC
 
 1. [Tóm tắt đánh giá](#1-tóm-tắt-đánh-giá)
